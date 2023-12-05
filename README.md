@@ -16,7 +16,7 @@ function _buyFromAMM(
         uint sUSDPaidCarried
     ) internal returns (uint sUSDPaid) {
         require(isMarketInAMMTrading(market), "Market is not in Trading phase");
-
+        // 需要支付的sUSD
         sUSDPaid = sUSDPaidCarried;
 
         uint basePrice = price(market, position);
@@ -48,8 +48,9 @@ function _buyFromAMM(
             spentOnMarket[market] = spentOnMarket[market] + toMint;
         }
         liquidityPool.getOptionsForBuy(market, amount - toMint, position);
-
+        // market中的Up/Down合约
         address target = _getTarget(market, position);
+        // Up/Down代币支付给用户
         IERC20Upgradeable(target).safeTransfer(msg.sender, amount);
 
         if (address(stakingThales) != address(0)) {
@@ -62,10 +63,11 @@ function _buyFromAMM(
             uint paidForDiscountedAmount = (sUSDPaid * discountedAmount) / amount;
             emit BoughtWithDiscount(msg.sender, discountedAmount, paidForDiscountedAmount);
         }
-
+        //下注到资金池
         _sendMintedPositionsAndUSDToLiquidityPool(market);
 
         emit BoughtFromAmm(msg.sender, market, position, amount, sUSDPaid, address(sUSD), target);
+        //处理相关事件
         _handleInTheMoneyEvent(market, position, sUSDPaid, msg.sender);
     }
 
