@@ -4,6 +4,118 @@
 https://thalesmarket.io/
 ### 介绍
 Thales 是一个以太坊协议，允许创建任何人都可以加入的点对点平局市场。这个构建模块是新颖的链上倡议的基础，从基于 AMM 的定价市场到沉浸式游戏化体验，以及更多。
+### 核心代码
+```
+function _buyFromAMM(
+        address market,
+        IThalesAMM.Position position,
+        uint amount,
+        uint expectedPayout,
+        uint additionalSlippage,
+        bool sendSUSD,
+        uint sUSDPaidCarried
+    ) internal returns (uint sUSDPaid) {
+        require(isMarketInAMMTrading(market), "Market is not in Trading phase");
+
+        sUSDPaid = sUSDPaidCarried;
+
+        uint basePrice = price(market, position);
+        uint basePriceOtherSide = ONE - basePrice;
+
+        basePrice = basePrice < minSupportedPrice ? minSupportedPrice : basePrice;
+
+        uint availableToBuyFromAMMatm = _availableToBuyFromAMMWithBasePrice(market, position, basePrice, false);
+        require(amount > 0 && amount <= availableToBuyFromAMMatm, "Not enough liquidity.");
+
+        if (sendSUSD) {
+            sUSDPaid = _buyFromAmmQuoteWithBasePrice(
+                market,
+                position,
+                amount,
+                basePrice,
+                basePriceOtherSide,
+                safeBoxFeePerAddress[msg.sender] > 0 ? safeBoxFeePerAddress[msg.sender] : safeBoxImpact
+            );
+            require((sUSDPaid * ONE) / (expectedPayout) <= (ONE + additionalSlippage), "Slippage too high");
+
+            sUSD.safeTransferFrom(msg.sender, address(this), sUSDPaid);
+        }
+
+        uint toMint = _getMintableAmount(market, position, amount);
+        if (toMint > 0) {
+            liquidityPool.commitTrade(market, toMint);
+            IPositionalMarket(market).mint(toMint);
+            spentOnMarket[market] = spentOnMarket[market] + toMint;
+        }
+        liquidityPool.getOptionsForBuy(market, amount - toMint, position);
+
+        address target = _getTarget(market, position);
+        IERC20Upgradeable(target).safeTransfer(msg.sender, amount);
+
+        if (address(stakingThales) != address(0)) {
+            stakingThales.updateVolume(msg.sender, sUSDPaid);
+        }
+        _updateSpentOnMarketOnBuy(market, sUSDPaid, msg.sender);
+
+        if (amount > toMint) {
+            uint discountedAmount = amount - toMint;
+            uint paidForDiscountedAmount = (sUSDPaid * discountedAmount) / amount;
+            emit BoughtWithDiscount(msg.sender, discountedAmount, paidForDiscountedAmount);
+        }
+
+        _sendMintedPositionsAndUSDToLiquidityPool(market);
+
+        emit BoughtFromAmm(msg.sender, market, position, amount, sUSDPaid, address(sUSD), target);
+        _handleInTheMoneyEvent(market, position, sUSDPaid, msg.sender);
+    }
+
+    function _handleInTheMoneyEvent(
+        address market,
+        IThalesAMM.Position position,
+        uint sUSDPaid,
+        address sender
+    ) internal {
+        (bytes32 key, uint strikePrice, ) = IPositionalMarket(market).getOracleDetails();
+        uint currentAssetPrice = priceFeed.rateForCurrency(key);
+        bool inTheMoney = position == IThalesAMM.Position.Up
+            ? currentAssetPrice >= strikePrice
+            : currentAssetPrice < strikePrice;
+        emit BoughtOptionType(msg.sender, sUSDPaid, inTheMoney);
+    }
+
+    function _getTarget(address market, IThalesAMM.Position position) internal view returns (address target) {
+        (IPosition up, IPosition down) = IPositionalMarket(market).getOptions();
+        target = address(position == IThalesAMM.Position.Up ? up : down);
+    }
+
+    function _updateSpentOnMarketOnSell(
+        address market,
+        uint sUSDPaid,
+        uint sUSDFromBurning,
+        address seller,
+        uint safeBoxShare
+    ) internal {
+        if (safeBoxImpact > 0) {
+            sUSD.safeTransfer(safeBox, safeBoxShare);
+        }
+
+        spentOnMarket[market] =
+            spentOnMarket[market] +
+            (IPositionalMarketManager(manager).reverseTransformCollateral(sUSDPaid + (safeBoxShare)));
+        if (spentOnMarket[market] <= IPositionalMarketManager(manager).reverseTransformCollateral(sUSDFromBurning)) {
+            spentOnMarket[market] = 0;
+        } else {
+            spentOnMarket[market] =
+                spentOnMarket[market] -
+                (IPositionalMarketManager(manager).reverseTransformCollateral(sUSDFromBurning));
+        }
+
+        if (referrerFee > 0 && referrals != address(0)) {
+            uint referrerShare = (sUSDPaid * ONE) / (ONE - (referrerFee)) - (sUSDPaid);
+            _handleReferrer(seller, referrerShare, sUSDPaid);
+        }
+    }
+```
 
 ## Pyth Network Benchmarks
 ### 网址
