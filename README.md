@@ -62,7 +62,7 @@ priceImpact和slippage的区别：priceImpact是处理头寸买入前后赔率�
         uint balanceOtherSideAfter;
         uint balancePositionAfter;
         uint availableToBuyFromAMM;
-        uint max_spread;
+        uint max_spread; // 使用 Thales AMM 进行交易时，对衍生价格可能产生的最大价格影响(如果交易耗尽 AMM 某一侧的所有流动性)
     }
 
     function buyPriceImpactImbalancedSkew(PriceImpactParams memory params) public view returns (uint) {
@@ -71,11 +71,13 @@ priceImpact和slippage的区别：priceImpact是处理头寸买入前后赔率�
         // 偏离：买入后balance之差
         uint skew = params.balanceOtherSideAfter - (params.balancePositionAfter);
         uint newImpact = (params.max_spread * ((skew * ONE) / (maxPossibleSkew))) / ONE;
-        if (params.balancePosition > 0 && params.amount > params.balancePosition) { // 需要mint
+        if (params.balancePosition > 0 && params.amount > params.balancePosition) { // 需要mint 超买
             uint newPriceForMintedOnes = newImpact / (2);
             uint tempMultiplier = (params.amount - params.balancePosition) * (newPriceForMintedOnes);
             return (tempMultiplier * ONE) / (params.amount) / ONE;
         } else {  // 不需要mint
+            // newImpact和previousImpact的计算与maxPossibleSkew的计算相似
+            // balanceOtherSideAfter + balanceOtherSide - balancePositionAfter
             uint previousSkew = params.balanceOtherSide;
             uint previousImpact = (params.max_spread * ((previousSkew * ONE) / (maxPossibleSkew))) / ONE;
             return (newImpact + previousImpact) / (2);
@@ -102,7 +104,7 @@ priceImpact和slippage的区别：priceImpact是处理头寸买入前后赔率�
                         balanceOtherSide,
                         params.amount,
                         params._availableToBuyFromAMMOtherSide,
-                        max_spread  // 某常量
+                        max_spread
                     )
                 );
             } else {
@@ -383,6 +385,41 @@ function _buyFromAMM(
         if (referrerFee > 0 && referrals != address(0)) {
             uint referrerShare = sUSDPaid - ((sUSDPaid * ONE) / (ONE + (referrerFee)));
             _handleReferrer(buyer, referrerShare, sUSDPaid);
+        }
+    }
+
+    function _buyFromAmmQuoteWithBasePrice(
+        address market,
+        IThalesAMM.Position position,
+        uint amount,
+        uint basePrice,
+        uint basePriceOtherSide,
+        uint safeBoxImpactForCaller
+    ) internal view returns (uint returnQuote) {
+        uint _available = _availableToBuyFromAMMWithBasePrice(market, position, basePrice, false);
+        uint _availableOtherSide = _availableToBuyFromAMMWithBasePrice(
+            market,
+            position == IThalesAMM.Position.Up ? IThalesAMM.Position.Down : IThalesAMM.Position.Up,
+            basePriceOtherSide,
+            true
+        );
+
+        if (amount <= _available) {
+            int tempQuote;
+            int skewImpact = _buyPriceImpact(
+                BuyPriceImpactParams(market, position, amount, _available, _availableOtherSide, liquidityPool, basePrice)
+            );
+            basePrice = basePrice + (min_spreadPerAddress[msg.sender] > 0 ? min_spreadPerAddress[msg.sender] : min_spread);
+            if (skewImpact >= 0) {
+                int impactPrice = ((ONE_INT - int(basePrice)) * skewImpact) / ONE_INT;
+                // add 2% to the price increase to avoid edge cases on the extremes
+                impactPrice = (impactPrice * (ONE_INT + (ONE_PERCENT_INT * 2))) / ONE_INT;
+                tempQuote = (int(amount) * (int(basePrice) + impactPrice)) / ONE_INT;
+            } else {
+                tempQuote = ((int(amount)) * ((int(basePrice) * (ONE_INT + skewImpact)) / ONE_INT)) / ONE_INT;
+            }
+            tempQuote = (tempQuote * (ONE_INT + (int(safeBoxImpactForCaller)))) / ONE_INT;
+            returnQuote = IPositionalMarketManager(manager).transformCollateral(uint(tempQuote));
         }
     }
 
